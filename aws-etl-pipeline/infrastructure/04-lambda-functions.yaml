@@ -1,0 +1,272 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda Functions for ETL Pipeline'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'etl-pipeline'
+    Description: 'Name of the ETL project'
+  
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  BuildNumber:
+    Type: String
+    Description: 'Build number for deployment artifacts'
+  
+  ArtifactsBucket:
+    Type: String
+    Description: 'S3 bucket containing deployment artifacts'
+
+Resources:
+  # Database Extraction Lambda Function
+  ExtractDatabaseFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-extract-database'
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/extract-database.zip'
+      Timeout: 900
+      MemorySize: 512
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          DATA_LAKE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucket'
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-LambdaSecurityGroup'
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet1'
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet2'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-extract-database'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # API Extraction Lambda Function
+  ExtractApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-extract-api'
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/extract-api.zip'
+      Timeout: 900
+      MemorySize: 512
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          DATA_LAKE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucket'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-extract-api'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Data Quality Check Lambda Function
+  DataQualityFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-data-quality'
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/data-quality.zip'
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          DATA_LAKE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucket'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-data-quality'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Redshift Loader Lambda Function
+  LoadRedshiftFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-load-redshift'
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/load-redshift.zip'
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          DATA_LAKE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucket'
+          REDSHIFT_SECRET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-RedshiftSecret'
+          REDSHIFT_IAM_ROLE: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-RedshiftServiceRole'
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-LambdaSecurityGroup'
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet1'
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet2'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-load-redshift'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Stream Processor Lambda Function
+  StreamProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-stream-processor'
+      Runtime: python3.9
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/stream-processor.zip'
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          DATA_LAKE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucket'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-stream-processor'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Log Groups
+  ExtractDatabaseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ExtractDatabaseFunction}'
+      RetentionInDays: 14
+
+  ExtractApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ExtractApiFunction}'
+      RetentionInDays: 14
+
+  DataQualityLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DataQualityFunction}'
+      RetentionInDays: 14
+
+  LoadRedshiftLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${LoadRedshiftFunction}'
+      RetentionInDays: 14
+
+  StreamProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${StreamProcessorFunction}'
+      RetentionInDays: 14
+
+  # Lambda Permissions for EventBridge
+  ExtractDatabaseEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ExtractDatabaseFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${ProjectName}-${Environment}-*'
+
+  ExtractApiEventPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ExtractApiFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/${ProjectName}-${Environment}-*'
+
+  # Lambda Permissions for Kinesis
+  StreamProcessorKinesisPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StreamProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: kinesis.amazonaws.com
+
+Outputs:
+  ExtractDatabaseFunctionArn:
+    Description: 'ARN of the database extraction Lambda function'
+    Value: !GetAtt ExtractDatabaseFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ExtractDatabaseFunctionArn'
+
+  ExtractApiFunctionArn:
+    Description: 'ARN of the API extraction Lambda function'
+    Value: !GetAtt ExtractApiFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ExtractApiFunctionArn'
+
+  DataQualityFunctionArn:
+    Description: 'ARN of the data quality Lambda function'
+    Value: !GetAtt DataQualityFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-DataQualityFunctionArn'
+
+  LoadRedshiftFunctionArn:
+    Description: 'ARN of the Redshift loader Lambda function'
+    Value: !GetAtt LoadRedshiftFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-LoadRedshiftFunctionArn'
+
+  StreamProcessorFunctionArn:
+    Description: 'ARN of the stream processor Lambda function'
+    Value: !GetAtt StreamProcessorFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-StreamProcessorFunctionArn'

@@ -1,0 +1,445 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step Functions Orchestration for ETL Pipeline'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'etl-pipeline'
+    Description: 'Name of the ETL project'
+  
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+
+Resources:
+  # Step Functions State Machine
+  ETLStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub '${ProjectName}-${Environment}-etl-pipeline'
+      RoleArn: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-StepFunctionsExecutionRole'
+      DefinitionString: !Sub |
+        {
+          "Comment": "ETL Pipeline Orchestration for ${ProjectName}-${Environment}",
+          "StartAt": "ExtractData",
+          "States": {
+            "ExtractData": {
+              "Type": "Parallel",
+              "Comment": "Extract data from multiple sources in parallel",
+              "Branches": [
+                {
+                  "StartAt": "ExtractDatabaseData",
+                  "States": {
+                    "ExtractDatabaseData": {
+                      "Type": "Task",
+                      "Resource": "${ExtractDatabaseFunctionArn}",
+                      "Parameters": {
+                        "database_secret": "${ProjectName}/${Environment}/source-db/credentials",
+                        "table_name": "users",
+                        "s3_bucket": "${DataLakeBucket}",
+                        "extraction_type": "incremental",
+                        "incremental_column": "updated_at",
+                        "batch_size": 10000
+                      },
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                          "IntervalSeconds": 30,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2.0
+                        }
+                      ],
+                      "Catch": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "Next": "ExtractDatabaseFailed",
+                          "ResultPath": "$.error"
+                        }
+                      ]
+                    },
+                    "ExtractDatabaseFailed": {
+                      "Type": "Fail",
+                      "Cause": "Database extraction failed"
+                    }
+                  }
+                },
+                {
+                  "StartAt": "ExtractAPIData",
+                  "States": {
+                    "ExtractAPIData": {
+                      "Type": "Task",
+                      "Resource": "${ExtractApiFunctionArn}",
+                      "Parameters": {
+                        "api_secret": "${ProjectName}/${Environment}/api/credentials",
+                        "endpoint_name": "orders",
+                        "s3_bucket": "${DataLakeBucket}",
+                        "extraction_type": "incremental",
+                        "incremental_field": "updated_at",
+                        "page_size": 1000,
+                        "max_pages": 100
+                      },
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                          "IntervalSeconds": 30,
+                          "MaxAttempts": 3,
+                          "BackoffRate": 2.0
+                        }
+                      ],
+                      "Catch": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "Next": "ExtractAPIFailed",
+                          "ResultPath": "$.error"
+                        }
+                      ]
+                    },
+                    "ExtractAPIFailed": {
+                      "Type": "Fail",
+                      "Cause": "API extraction failed"
+                    }
+                  }
+                }
+              ],
+              "Next": "CheckExtractionResults",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "ExtractionFailureNotification",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+            "CheckExtractionResults": {
+              "Type": "Choice",
+              "Comment": "Check if any data was extracted",
+              "Choices": [
+                {
+                  "And": [
+                    {
+                      "Variable": "$[0].records_extracted",
+                      "NumericGreaterThan": 0
+                    },
+                    {
+                      "Variable": "$[1].records_extracted", 
+                      "NumericGreaterThan": 0
+                    }
+                  ],
+                  "Next": "TransformData"
+                }
+              ],
+              "Default": "NoDataToProcess"
+            },
+            "NoDataToProcess": {
+              "Type": "Succeed",
+              "Comment": "No new data to process"
+            },
+            "TransformData": {
+              "Type": "Parallel",
+              "Comment": "Transform extracted data in parallel",
+              "Branches": [
+                {
+                  "StartAt": "TransformUsers",
+                  "States": {
+                    "TransformUsers": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+                      "Parameters": {
+                        "JobName": "${ProjectName}-${Environment}-transform-users",
+                        "Arguments": {
+                          "--SOURCE_S3_PATH": "s3://${DataLakeBucket}/raw-data/source=database/table=users/",
+                          "--TARGET_S3_PATH": "s3://${DataLakeBucket}/processed-data/table=dim_users/",
+                          "--DATABASE_NAME": "${ProjectName}-${Environment}-catalog",
+                          "--TABLE_NAME": "dim_users"
+                        }
+                      },
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "IntervalSeconds": 60,
+                          "MaxAttempts": 2,
+                          "BackoffRate": 2.0
+                        }
+                      ]
+                    }
+                  }
+                },
+                {
+                  "StartAt": "TransformOrders",
+                  "States": {
+                    "TransformOrders": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+                      "Parameters": {
+                        "JobName": "${ProjectName}-${Environment}-transform-orders",
+                        "Arguments": {
+                          "--SOURCE_S3_PATH": "s3://${DataLakeBucket}/raw-data/source=api/endpoint=orders/",
+                          "--TARGET_S3_PATH": "s3://${DataLakeBucket}/processed-data/table=fact_orders/",
+                          "--DATABASE_NAME": "${ProjectName}-${Environment}-catalog",
+                          "--TABLE_NAME": "fact_orders"
+                        }
+                      },
+                      "End": true,
+                      "Retry": [
+                        {
+                          "ErrorEquals": ["States.TaskFailed"],
+                          "IntervalSeconds": 60,
+                          "MaxAttempts": 2,
+                          "BackoffRate": 2.0
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "Next": "DataQualityCheck",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "TransformationFailureNotification",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+            "DataQualityCheck": {
+              "Type": "Task",
+              "Resource": "${DataQualityFunctionArn}",
+              "Parameters": {
+                "s3_paths": [
+                  "s3://${DataLakeBucket}/processed-data/table=dim_users/",
+                  "s3://${DataLakeBucket}/processed-data/table=fact_orders/"
+                ],
+                "quality_rules": {
+                  "dim_users": [
+                    {"rule": "not_null", "column": "user_id"},
+                    {"rule": "email_format", "column": "email"},
+                    {"rule": "unique", "column": "user_id"}
+                  ],
+                  "fact_orders": [
+                    {"rule": "not_null", "column": "order_id"},
+                    {"rule": "positive", "column": "total_amount"},
+                    {"rule": "foreign_key", "column": "user_id", "reference_table": "dim_users"}
+                  ]
+                }
+              },
+              "Next": "CheckDataQuality",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+                  "IntervalSeconds": 30,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "Next": "DataQualityFailureNotification",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+            "CheckDataQuality": {
+              "Type": "Choice",
+              "Comment": "Check data quality results",
+              "Choices": [
+                {
+                  "Variable": "$.quality_passed",
+                  "BooleanEquals": true,
+                  "Next": "LoadToRedshift"
+                }
+              ],
+              "Default": "DataQualityFailureNotification"
+            },
+            "LoadToRedshift": {
+              "Type": "Task",
+              "Resource": "${LoadRedshiftFunctionArn}",
+              "Parameters": {
+                "tables_to_load": [
+                  {
+                    "table_name": "dim_users",
+                    "s3_path": "s3://${DataLakeBucket}/processed-data/table=dim_users/",
+                    "load_type": "scd2"
+                  },
+                  {
+                    "table_name": "fact_orders", 
+                    "s3_path": "s3://${DataLakeBucket}/processed-data/table=fact_orders/",
+                    "load_type": "upsert"
+                  }
+                ]
+              },
+              "Next": "UpdateDataCatalog",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+                  "IntervalSeconds": 60,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.TaskFailed"],
+                  "Next": "LoadFailureNotification",
+                  "ResultPath": "$.error"
+                }
+              ]
+            },
+            "UpdateDataCatalog": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::glue:startCrawler",
+              "Parameters": {
+                "Name": "${ProjectName}-${Environment}-processed-data-crawler"
+              },
+              "Next": "SendSuccessNotification",
+              "Retry": [
+                {
+                  "ErrorEquals": ["Glue.CrawlerRunningException"],
+                  "IntervalSeconds": 60,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 1.5
+                }
+              ]
+            },
+            "SendSuccessNotification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${NotificationTopic}",
+                "Subject": "ETL Pipeline Success - ${ProjectName}-${Environment}",
+                "Message.$": "$.message"
+              },
+              "End": true
+            },
+            "ExtractionFailureNotification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${NotificationTopic}",
+                "Subject": "ETL Pipeline Failure - Data Extraction - ${ProjectName}-${Environment}",
+                "Message.$": "$.error"
+              },
+              "End": true
+            },
+            "TransformationFailureNotification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${NotificationTopic}",
+                "Subject": "ETL Pipeline Failure - Data Transformation - ${ProjectName}-${Environment}",
+                "Message.$": "$.error"
+              },
+              "End": true
+            },
+            "DataQualityFailureNotification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${NotificationTopic}",
+                "Subject": "ETL Pipeline Failure - Data Quality Check - ${ProjectName}-${Environment}",
+                "Message.$": "$.error"
+              },
+              "End": true
+            },
+            "LoadFailureNotification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${NotificationTopic}",
+                "Subject": "ETL Pipeline Failure - Data Loading - ${ProjectName}-${Environment}",
+                "Message.$": "$.error"
+              },
+              "End": true
+            }
+          }
+        }
+      DefinitionSubstitutions:
+        ExtractDatabaseFunctionArn: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-ExtractDatabaseFunctionArn'
+        ExtractApiFunctionArn: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-ExtractApiFunctionArn'
+        DataQualityFunctionArn: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-DataQualityFunctionArn'
+        LoadRedshiftFunctionArn: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-LoadRedshiftFunctionArn'
+        DataLakeBucket: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucket'
+        NotificationTopic: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-NotificationTopic'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-etl-pipeline'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # EventBridge Rule for Daily ETL Execution
+  DailyETLSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-daily-etl'
+      Description: 'Daily ETL pipeline execution'
+      ScheduleExpression: 'cron(0 2 * * ? *)'  # Run at 2 AM UTC daily
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ETLStateMachine.Arn
+          Id: 'ETLStateMachineTarget'
+          RoleArn: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-StepFunctionsExecutionRole'
+          Input: !Sub |
+            {
+              "execution_type": "scheduled",
+              "execution_date": "{{ aws.events.event.ingestion-time }}",
+              "environment": "${Environment}"
+            }
+
+  # EventBridge Rule for Manual ETL Execution
+  ManualETLTrigger:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-manual-etl'
+      Description: 'Manual ETL pipeline trigger'
+      EventPattern:
+        source: ['etl.pipeline']
+        detail-type: ['Manual ETL Trigger']
+        detail:
+          environment: [!Ref Environment]
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ETLStateMachine.Arn
+          Id: 'ManualETLTarget'
+          RoleArn: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-StepFunctionsExecutionRole'
+
+  # CloudWatch Log Group for Step Functions
+  StepFunctionsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/${ProjectName}-${Environment}-etl-pipeline'
+      RetentionInDays: 30
+
+Outputs:
+  StateMachineArn:
+    Description: 'ARN of the ETL Step Functions state machine'
+    Value: !GetAtt ETLStateMachine.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-StateMachineArn'
+
+  StateMachineName:
+    Description: 'Name of the ETL Step Functions state machine'
+    Value: !Ref ETLStateMachine
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-StateMachineName'
+
+  DailyScheduleArn:
+    Description: 'ARN of the daily ETL schedule rule'
+    Value: !GetAtt DailyETLSchedule.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-DailyScheduleArn'

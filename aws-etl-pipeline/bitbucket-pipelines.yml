@@ -1,0 +1,205 @@
+image: python:3.9
+
+definitions:
+  caches:
+    pip: ~/.cache/pip
+    
+  services:
+    docker:
+      memory: 2048
+
+  steps:
+    - step: &validate-templates
+        name: Validate CloudFormation Templates
+        caches:
+          - pip
+        script:
+          - pip install awscli cfn-lint
+          - echo "Validating CloudFormation templates..."
+          - for template in infrastructure/*.yaml; do
+              echo "Validating $template"
+              aws cloudformation validate-template --template-body file://$template --region us-east-1
+              cfn-lint $template
+            done
+        
+    - step: &test-lambda
+        name: Test Lambda Functions
+        caches:
+          - pip
+        script:
+          - echo "Running Lambda function tests..."
+          # Test database extraction Lambda
+          - cd lambda/extract_database
+          - pip install -r requirements.txt
+          - pip install pytest moto
+          - python -m pytest tests/ -v --cov=lambda_function --cov-report=xml
+          - cd ../..
+          
+          # Test API extraction Lambda
+          - cd lambda/extract_api
+          - pip install -r requirements.txt
+          - pip install pytest moto requests-mock
+          - python -m pytest tests/ -v --cov=lambda_function --cov-report=xml
+          - cd ../..
+          
+          # Test data quality Lambda
+          - cd lambda/data_quality
+          - pip install -r requirements.txt
+          - pip install pytest moto
+          - python -m pytest tests/ -v --cov=lambda_function --cov-report=xml
+          - cd ../..
+        artifacts:
+          - lambda/*/coverage.xml
+          
+    - step: &build-lambda
+        name: Build Lambda Packages
+        caches:
+          - pip
+        script:
+          - echo "Building Lambda deployment packages..."
+          - mkdir -p build/lambda
+          
+          # Build database extraction Lambda
+          - cd lambda/extract_database
+          - pip install -r requirements.txt -t .
+          - zip -r ../../build/lambda/extract-database.zip . -x "tests/*" "*.pyc" "__pycache__/*"
+          - cd ../..
+          
+          # Build API extraction Lambda
+          - cd lambda/extract_api
+          - pip install -r requirements.txt -t .
+          - zip -r ../../build/lambda/extract-api.zip . -x "tests/*" "*.pyc" "__pycache__/*"
+          - cd ../..
+          
+          # Build data quality Lambda
+          - cd lambda/data_quality
+          - pip install -r requirements.txt -t .
+          - zip -r ../../build/lambda/data-quality.zip . -x "tests/*" "*.pyc" "__pycache__/*"
+          - cd ../..
+          
+          # Build Redshift loader Lambda
+          - cd lambda/load_redshift
+          - pip install -r requirements.txt -t .
+          - zip -r ../../build/lambda/load-redshift.zip . -x "tests/*" "*.pyc" "__pycache__/*"
+          - cd ../..
+          
+          # Build streaming processor Lambda
+          - cd lambda/stream_processor
+          - pip install -r requirements.txt -t .
+          - zip -r ../../build/lambda/stream-processor.zip . -x "tests/*" "*.pyc" "__pycache__/*"
+          - cd ../..
+          
+        artifacts:
+          - build/lambda/*.zip
+          
+    - step: &upload-artifacts
+        name: Upload Artifacts to S3
+        script:
+          - pip install awscli
+          - echo "Uploading Lambda packages to S3..."
+          - aws s3 cp build/lambda/ s3://$ARTIFACTS_BUCKET/lambda-packages/$BITBUCKET_BUILD_NUMBER/ --recursive
+          - echo "Uploading CloudFormation templates to S3..."
+          - aws s3 cp infrastructure/ s3://$ARTIFACTS_BUCKET/cloudformation/$BITBUCKET_BUILD_NUMBER/ --recursive
+          - echo "Uploading Glue scripts to S3..."
+          - aws s3 cp glue-jobs/ s3://$ARTIFACTS_BUCKET/glue-scripts/$BITBUCKET_BUILD_NUMBER/ --recursive
+        artifacts:
+          - build/lambda/*.zip
+          
+    - step: &deploy-infrastructure
+        name: Deploy Infrastructure
+        script:
+          - pip install awscli
+          - echo "Deploying ETL Pipeline infrastructure to $ENVIRONMENT..."
+          - chmod +x scripts/deploy.sh
+          - ./scripts/deploy.sh $ENVIRONMENT $BITBUCKET_BUILD_NUMBER
+          
+    - step: &run-integration-tests
+        name: Run Integration Tests
+        script:
+          - pip install awscli boto3 pytest
+          - echo "Running integration tests..."
+          - cd tests/integration
+          - python -m pytest test_etl_pipeline.py -v --environment=$ENVIRONMENT
+          
+    - step: &deploy-glue-jobs
+        name: Deploy Glue Jobs
+        script:
+          - pip install awscli
+          - echo "Deploying Glue ETL jobs..."
+          - chmod +x scripts/deploy-glue-jobs.sh
+          - ./scripts/deploy-glue-jobs.sh $ENVIRONMENT $BITBUCKET_BUILD_NUMBER
+
+pipelines:
+  default:
+    - step: *validate-templates
+    - step: *test-lambda
+    
+  branches:
+    develop:
+      - step: *validate-templates
+      - step: *test-lambda
+      - step: *build-lambda
+      - step:
+          <<: *upload-artifacts
+          deployment: development-artifacts
+      - step:
+          <<: *deploy-infrastructure
+          deployment: development
+          trigger: manual
+      - step:
+          <<: *deploy-glue-jobs
+          deployment: development
+      - step:
+          <<: *run-integration-tests
+          deployment: development
+          
+    main:
+      - step: *validate-templates
+      - step: *test-lambda
+      - step: *build-lambda
+      - step:
+          <<: *upload-artifacts
+          deployment: staging-artifacts
+      - step:
+          <<: *deploy-infrastructure
+          deployment: staging
+          trigger: manual
+      - step:
+          <<: *deploy-glue-jobs
+          deployment: staging
+      - step:
+          <<: *run-integration-tests
+          deployment: staging
+      - step:
+          <<: *deploy-infrastructure
+          deployment: production
+          trigger: manual
+      - step:
+          <<: *deploy-glue-jobs
+          deployment: production
+      - step:
+          <<: *run-integration-tests
+          deployment: production
+
+  pull-requests:
+    '**':
+      - step: *validate-templates
+      - step: *test-lambda
+      
+  tags:
+    'v*':
+      - step: *validate-templates
+      - step: *test-lambda
+      - step: *build-lambda
+      - step:
+          <<: *upload-artifacts
+          deployment: production-artifacts
+      - step:
+          <<: *deploy-infrastructure
+          deployment: production
+      - step:
+          <<: *deploy-glue-jobs
+          deployment: production
+      - step:
+          <<: *run-integration-tests
+          deployment: production
