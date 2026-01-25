@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Master CloudFormation Stack for AWS ETL Pipeline with Apache Iceberg'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'etl-pipeline'
+    Description: 'Name of the ETL project'
+  
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  BuildNumber:
+    Type: String
+    Description: 'Build number for deployment artifacts'
+  
+  ArtifactsBucket:
+    Type: String
+    Description: 'S3 bucket containing deployment artifacts'
+  
+  RedshiftPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 64
+    Description: 'Password for Redshift cluster (8-64 characters)'
+
+Resources:
+  # 1. IAM Roles and S3 Buckets
+  IAMRolesStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactsBucket}.s3.amazonaws.com/cloudformation-templates/${BuildNumber}/01-iam-roles.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iam-roles'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # 2. VPC and Networking
+  VPCNetworkStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactsBucket}.s3.amazonaws.com/cloudformation-templates/${BuildNumber}/02-vpc-network.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-vpc-network'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # 3. Redshift Data Warehouse
+  RedshiftStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - IAMRolesStack
+      - VPCNetworkStack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactsBucket}.s3.amazonaws.com/cloudformation-templates/${BuildNumber}/02-redshift.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        RedshiftPassword: !Ref RedshiftPassword
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-redshift'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # 4. Apache Iceberg with Glue
+  IcebergGlueStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: IAMRolesStack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactsBucket}.s3.amazonaws.com/cloudformation-templates/${BuildNumber}/03-iceberg-glue.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iceberg-glue'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # 5. Lambda Functions
+  LambdaFunctionsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - IAMRolesStack
+      - VPCNetworkStack
+      - RedshiftStack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactsBucket}.s3.amazonaws.com/cloudformation-templates/${BuildNumber}/04-lambda-functions.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        BuildNumber: !Ref BuildNumber
+        ArtifactsBucket: !Ref ArtifactsBucket
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-lambda-functions'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # 6. Iceberg Lambda Functions
+  IcebergLambdaStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - IAMRolesStack
+      - VPCNetworkStack
+      - IcebergGlueStack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactsBucket}.s3.amazonaws.com/cloudformation-templates/${BuildNumber}/05-iceberg-lambda.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+        BuildNumber: !Ref BuildNumber
+        ArtifactsBucket: !Ref ArtifactsBucket
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iceberg-lambda'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # 7. Step Functions Orchestration
+  StepFunctionsStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - LambdaFunctionsStack
+      - IcebergLambdaStack
+    Properties:
+      TemplateURL: !Sub 'https://${ArtifactsBucket}.s3.amazonaws.com/cloudformation-templates/${BuildNumber}/06-step-functions.yaml'
+      Parameters:
+        ProjectName: !Ref ProjectName
+        Environment: !Ref Environment
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-step-functions'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+  MasterStackId:
+    Description: 'ID of the master CloudFormation stack'
+    Value: !Ref AWS::StackId
+
+  DataLakeBucketName:
+    Description: 'Name of the S3 Data Lake bucket'
+    Value: !GetAtt IAMRolesStack.Outputs.DataLakeBucketName
+
+  IcebergWarehouseBucketName:
+    Description: 'Name of the Iceberg warehouse S3 bucket'
+    Value: !GetAtt IcebergGlueStack.Outputs.IcebergWarehouseBucketName
+
+  RedshiftClusterEndpoint:
+    Description: 'Redshift cluster endpoint'
+    Value: !GetAtt RedshiftStack.Outputs.RedshiftClusterEndpoint
+
+  StateMachineArn:
+    Description: 'ARN of the ETL Step Functions state machine'
+    Value: !GetAtt StepFunctionsStack.Outputs.StateMachineArn
+
+  IcebergGlueDatabaseName:
+    Description: 'Name of the Iceberg Glue database'
+    Value: !GetAtt IcebergGlueStack.Outputs.IcebergGlueDatabaseName
+
+  DeploymentSummary:
+    Description: 'Summary of deployed resources'
+    Value: !Sub |
+      ETL Pipeline with Apache Iceberg deployed successfully!
+      
+      Environment: ${Environment}
+      Project: ${ProjectName}
+      Build: ${BuildNumber}
+      
+      Key Resources:
+      - Data Lake: ${IAMRolesStack.Outputs.DataLakeBucketName}
+      - Iceberg Warehouse: ${IcebergGlueStack.Outputs.IcebergWarehouseBucketName}
+      - Redshift Cluster: ${RedshiftStack.Outputs.RedshiftClusterEndpoint}
+      - Step Functions: ${StepFunctionsStack.Outputs.StateMachineName}
+      
+      Next Steps:
+      1. Upload Glue job scripts to S3
+      2. Deploy Lambda function code
+      3. Test the ETL pipeline
+      4. Configure monitoring and alerts

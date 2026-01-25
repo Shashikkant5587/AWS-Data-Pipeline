@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Amazon Redshift Data Warehouse for ETL Pipeline'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'etl-pipeline'
+    Description: 'Name of the ETL project'
+  
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  RedshiftUsername:
+    Type: String
+    Default: 'etladmin'
+    Description: 'Username for Redshift cluster'
+  
+  RedshiftPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 64
+    Description: 'Password for Redshift cluster (8-64 characters)'
+  
+  NodeType:
+    Type: String
+    Default: 'dc2.large'
+    AllowedValues: ['dc2.large', 'dc2.8xlarge', 'ds2.xlarge', 'ds2.8xlarge', 'ra3.xlplus', 'ra3.4xlarge', 'ra3.16xlarge']
+    Description: 'Redshift node type'
+  
+  ClusterType:
+    Type: String
+    Default: 'single-node'
+    AllowedValues: ['single-node', 'multi-node']
+    Description: 'Redshift cluster type'
+
+Resources:
+  # VPC for Redshift
+  RedshiftVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-redshift-vpc'
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-igw'
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref RedshiftVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Subnets
+  RedshiftSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RedshiftVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-redshift-subnet-1'
+
+  RedshiftSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref RedshiftVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-redshift-subnet-2'
+
+  # Route Table
+  RedshiftRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref RedshiftVPC
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-redshift-rt'
+
+  RedshiftRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RedshiftRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  RedshiftSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref RedshiftSubnet1
+      RouteTableId: !Ref RedshiftRouteTable
+
+  RedshiftSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref RedshiftSubnet2
+      RouteTableId: !Ref RedshiftRouteTable
+
+  # Security Group
+  RedshiftSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: 'Security group for Redshift cluster'
+      VpcId: !Ref RedshiftVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          CidrIp: 10.0.0.0/16
+          Description: 'Redshift access from VPC'
+        - IpProtocol: tcp
+          FromPort: 5439
+          ToPort: 5439
+          CidrIp: 0.0.0.0/0
+          Description: 'Redshift access from internet (for demo - restrict in production)'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-redshift-sg'
+
+  # Redshift Subnet Group
+  RedshiftSubnetGroup:
+    Type: AWS::Redshift::SubnetGroup
+    Properties:
+      Description: 'Subnet group for Redshift cluster'
+      SubnetIds:
+        - !Ref RedshiftSubnet1
+        - !Ref RedshiftSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-redshift-subnet-group'
+
+  # Redshift Parameter Group
+  RedshiftParameterGroup:
+    Type: AWS::Redshift::ClusterParameterGroup
+    Properties:
+      Description: 'Parameter group for Redshift cluster'
+      ParameterGroupFamily: 'redshift-1.0'
+      Parameters:
+        - ParameterName: 'enable_user_activity_logging'
+          ParameterValue: 'true'
+        - ParameterName: 'max_concurrency_scaling_clusters'
+          ParameterValue: '1'
+
+  # Redshift Cluster
+  RedshiftCluster:
+    Type: AWS::Redshift::Cluster
+    Properties:
+      ClusterIdentifier: !Sub '${ProjectName}-redshift-cluster'
+      ClusterType: 'single-node'
+      NodeType: 'dc2.large'
+      DBName: 'etldb'
+      MasterUsername: !Ref RedshiftUsername
+      MasterUserPassword: !Ref RedshiftPassword
+      VpcSecurityGroupIds:
+        - !Ref RedshiftSecurityGroup
+      ClusterSubnetGroupName: !Ref RedshiftSubnetGroup
+      ClusterParameterGroupName: !Ref RedshiftParameterGroup
+      IamRoles:
+        - !ImportValue
+          Fn::Sub: '${ProjectName}-RedshiftServiceRole'
+      PubliclyAccessible: true
+      Encrypted: true
+      KmsKeyId: !ImportValue
+        Fn::Sub: '${ProjectName}-KMSKey'
+      AutomatedSnapshotRetentionPeriod: 7
+      PreferredMaintenanceWindow: 'sun:05:00-sun:06:00'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-redshift-cluster'
+
+  # Store Redshift credentials in Secrets Manager
+  RedshiftSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub '${ProjectName}/redshift/credentials'
+      Description: 'Redshift cluster credentials'
+      SecretString: !Sub |
+        {
+          "username": "${RedshiftUsername}",
+          "password": "${RedshiftPassword}",
+          "host": "${RedshiftCluster.Endpoint.Address}",
+          "port": "${RedshiftCluster.Endpoint.Port}",
+          "database": "etldb",
+          "jdbc_url": "jdbc:redshift://${RedshiftCluster.Endpoint.Address}:${RedshiftCluster.Endpoint.Port}/etldb"
+        }
+
+Outputs:
+  RedshiftClusterEndpoint:
+    Description: 'Redshift cluster endpoint'
+    Value: !GetAtt RedshiftCluster.Endpoint.Address
+    Export:
+      Name: !Sub '${ProjectName}-RedshiftEndpoint'
+
+  RedshiftClusterPort:
+    Description: 'Redshift cluster port'
+    Value: !GetAtt RedshiftCluster.Endpoint.Port
+    Export:
+      Name: !Sub '${ProjectName}-RedshiftPort'
+
+  RedshiftJdbcUrl:
+    Description: 'Redshift JDBC URL'
+    Value: !Sub 'jdbc:redshift://${RedshiftCluster.Endpoint.Address}:${RedshiftCluster.Endpoint.Port}/etldb'
+    Export:
+      Name: !Sub '${ProjectName}-RedshiftJdbcUrl'
+
+  RedshiftSecretArn:
+    Description: 'ARN of Redshift credentials secret'
+    Value: !Ref RedshiftSecret
+    Export:
+      Name: !Sub '${ProjectName}-RedshiftSecret'

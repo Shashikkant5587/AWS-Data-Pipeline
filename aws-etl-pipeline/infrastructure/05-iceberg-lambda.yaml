@@ -1,0 +1,315 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda Functions for Apache Iceberg Operations'
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: 'etl-pipeline'
+    Description: 'Name of the ETL project'
+  
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  BuildNumber:
+    Type: String
+    Description: 'Build number for deployment artifacts'
+  
+  ArtifactsBucket:
+    Type: String
+    Description: 'S3 bucket containing deployment artifacts'
+
+Resources:
+  # Iceberg Table Manager Lambda Function
+  IcebergTableManagerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-iceberg-table-manager'
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/iceberg-table-manager.zip'
+      Timeout: 900
+      MemorySize: 1024
+      ReservedConcurrencyLimit: 10
+      DeadLetterConfig:
+        TargetArn: !GetAtt IcebergDLQ.Arn
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          ICEBERG_WAREHOUSE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-IcebergWarehouseBucket'
+          ICEBERG_DATABASE: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-IcebergGlueDatabase'
+          ATHENA_RESULTS_BUCKET: !Sub '${ProjectName}-${Environment}-athena-results-${AWS::AccountId}'
+          ATHENA_WORKGROUP: !Sub '${ProjectName}-${Environment}-workgroup'
+        KmsKeyArn: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-LambdaSecurityGroup'
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet1'
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet2'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iceberg-table-manager'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Iceberg Migration Lambda Function
+  IcebergMigrationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-iceberg-migration'
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/iceberg-migration.zip'
+      Timeout: 900
+      MemorySize: 2048
+      ReservedConcurrencyLimit: 5
+      DeadLetterConfig:
+        TargetArn: !GetAtt IcebergDLQ.Arn
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          DATA_LAKE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-DataLakeBucket'
+          ICEBERG_WAREHOUSE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-IcebergWarehouseBucket'
+          ICEBERG_DATABASE: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-IcebergGlueDatabase'
+        KmsKeyArn: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-LambdaSecurityGroup'
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet1'
+          - !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-PrivateSubnet2'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iceberg-migration'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Iceberg Time Travel Lambda Function
+  IcebergTimeTravelFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-${Environment}-iceberg-time-travel'
+      Runtime: python3.11
+      Handler: lambda_function.lambda_handler
+      Role: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-LambdaExecutionRole'
+      Code:
+        S3Bucket: !Ref ArtifactsBucket
+        S3Key: !Sub 'lambda-packages/${BuildNumber}/iceberg-time-travel.zip'
+      Timeout: 300
+      MemorySize: 512
+      ReservedConcurrencyLimit: 20
+      DeadLetterConfig:
+        TargetArn: !GetAtt IcebergDLQ.Arn
+      Environment:
+        Variables:
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT: !Ref Environment
+          ICEBERG_WAREHOUSE_BUCKET: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-IcebergWarehouseBucket'
+          ICEBERG_DATABASE: !ImportValue
+            Fn::Sub: '${ProjectName}-${Environment}-IcebergGlueDatabase'
+          ATHENA_RESULTS_BUCKET: !Sub '${ProjectName}-${Environment}-athena-results-${AWS::AccountId}'
+          ATHENA_WORKGROUP: !Sub '${ProjectName}-${Environment}-workgroup'
+        KmsKeyArn: !ImportValue
+          Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iceberg-time-travel'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # Dead Letter Queue for Iceberg Lambda Functions
+  IcebergDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}-${Environment}-iceberg-dlq'
+      MessageRetentionPeriod: 1209600  # 14 days
+      KmsMasterKeyId: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iceberg-dlq'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # CloudWatch Log Groups
+  IcebergTableManagerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${IcebergTableManagerFunction}'
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+
+  IcebergMigrationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${IcebergMigrationFunction}'
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+
+  IcebergTimeTravelLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${IcebergTimeTravelFunction}'
+      RetentionInDays: 14
+      KmsKeyId: !ImportValue
+        Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+
+  # Lambda Permissions for API Gateway (if needed)
+  IcebergTableManagerApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IcebergTableManagerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/*'
+
+  IcebergTimeTravelApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IcebergTimeTravelFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/*'
+
+  # Lambda Permissions for Step Functions
+  IcebergTableManagerStepFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IcebergTableManagerFunction
+      Action: lambda:InvokeFunction
+      Principal: states.amazonaws.com
+      SourceArn: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-${Environment}-*'
+
+  IcebergMigrationStepFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IcebergMigrationFunction
+      Action: lambda:InvokeFunction
+      Principal: states.amazonaws.com
+      SourceArn: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${ProjectName}-${Environment}-*'
+
+  # Athena Workgroup for Iceberg Queries
+  IcebergAthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: !Sub '${ProjectName}-${Environment}-iceberg-workgroup'
+      Description: 'Athena workgroup for Iceberg time travel queries'
+      State: ENABLED
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub 's3://${ProjectName}-${Environment}-athena-results-${AWS::AccountId}/'
+          EncryptionConfiguration:
+            EncryptionOption: SSE_KMS
+            KmsKey: !ImportValue
+              Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetrics: true
+        BytesScannedCutoffPerQuery: 1073741824  # 1GB limit
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-iceberg-workgroup'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # S3 Bucket for Athena Results
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${ProjectName}-${Environment}-athena-results-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !ImportValue
+                Fn::Sub: '${ProjectName}-${Environment}-KMSKey'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldQueryResults
+            Status: Enabled
+            ExpirationInDays: 30
+      LoggingConfiguration:
+        DestinationBucketName: !Sub '${ProjectName}-${Environment}-access-logs-${AWS::AccountId}'
+        LogFilePrefix: 'athena-results-access-logs/'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-${Environment}-athena-results'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+
+Outputs:
+  IcebergTableManagerFunctionArn:
+    Description: 'ARN of the Iceberg table manager Lambda function'
+    Value: !GetAtt IcebergTableManagerFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-IcebergTableManagerFunctionArn'
+
+  IcebergMigrationFunctionArn:
+    Description: 'ARN of the Iceberg migration Lambda function'
+    Value: !GetAtt IcebergMigrationFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-IcebergMigrationFunctionArn'
+
+  IcebergTimeTravelFunctionArn:
+    Description: 'ARN of the Iceberg time travel Lambda function'
+    Value: !GetAtt IcebergTimeTravelFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-IcebergTimeTravelFunctionArn'
+
+  IcebergAthenaWorkgroupName:
+    Description: 'Name of the Iceberg Athena workgroup'
+    Value: !Ref IcebergAthenaWorkgroup
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-IcebergAthenaWorkgroup'
+
+  AthenaResultsBucketName:
+    Description: 'Name of the Athena results S3 bucket'
+    Value: !Ref AthenaResultsBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-AthenaResultsBucket'
