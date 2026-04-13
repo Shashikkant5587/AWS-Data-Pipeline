@@ -40,6 +40,7 @@ glue_client = boto3.client('glue')
 def main():
     """Main ETL function for transforming user data"""
     
+    logger.info("Pipeline trigger validation change for CI/CD email flow")
     logger.info(f"Starting user data transformation job: {args['JOB_NAME']}")
     logger.info(f"Source path: {args['SOURCE_S3_PATH']}")
     logger.info(f"Target path: {args['TARGET_S3_PATH']}")
