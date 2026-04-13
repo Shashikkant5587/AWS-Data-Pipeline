@@ -61,7 +61,7 @@ Create Jenkins credentials:
 3. Set script path to: `Jenkinsfile`
 4. Build with parameters and provide:
    - `REDSHIFT_PASSWORD`
-   - `EMAIL_RECIPIENTS` (for success/failure notifications)
+   - `EMAIL_RECIPIENTS` (default is `kantshashi250516@gmail.com`)
    - Optional custom credentials IDs
    - Optional `AUTO_APPROVE_PROD=true` for non-interactive promotion
 

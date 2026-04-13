@@ -24,7 +24,7 @@ pipeline {
         string(name: 'JFROG_CREDENTIALS_ID', defaultValue: 'jfrog-credentials', description: 'Jenkins credentials ID (username/password or token)')
         booleanParam(name: 'RUN_SONAR', defaultValue: true, description: 'Enable SonarQube static analysis')
         booleanParam(name: 'AUTO_APPROVE_PROD', defaultValue: false, description: 'Bypass manual approval gate for production')
-        string(name: 'EMAIL_RECIPIENTS', defaultValue: 'devops@example.com', description: 'Comma-separated recipients for build notifications')
+        string(name: 'EMAIL_RECIPIENTS', defaultValue: 'kantshashi250516@gmail.com', description: 'Comma-separated recipients for build notifications')
     }
 
     stages {
