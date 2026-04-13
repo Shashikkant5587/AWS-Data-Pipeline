@@ -1,0 +1,187 @@
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    environment {
+        AWS_DEFAULT_REGION = 'us-east-1'
+        PROJECT_NAME = 'etl-pipeline'
+        ARTIFACT_NAME = "etl-pipeline-${env.BUILD_NUMBER}.tar.gz"
+        SONARQUBE_SERVER = 'sonarqube-server'
+        SONAR_SCANNER_TOOL = 'sonar-scanner'
+        JFROG_PLATFORM_URL = 'https://your-company.jfrog.io'
+        JFROG_REPO = 'etl-generic-local'
+    }
+
+    parameters {
+        string(name: 'DEV_AWS_CREDENTIALS_ID', defaultValue: 'aws-dev-credentials', description: 'Jenkins AWS credentials ID for Dev')
+        string(name: 'PROD_AWS_CREDENTIALS_ID', defaultValue: 'aws-prod-credentials', description: 'Jenkins AWS credentials ID for Prod')
+        password(name: 'REDSHIFT_PASSWORD', defaultValue: '', description: 'Redshift admin password used by deployment')
+        string(name: 'JFROG_CREDENTIALS_ID', defaultValue: 'jfrog-credentials', description: 'Jenkins credentials ID (username/password or token)')
+        booleanParam(name: 'RUN_SONAR', defaultValue: true, description: 'Enable SonarQube static analysis')
+        booleanParam(name: 'AUTO_APPROVE_PROD', defaultValue: false, description: 'Bypass manual approval gate for production')
+        string(name: 'EMAIL_RECIPIENTS', defaultValue: 'devops@example.com', description: 'Comma-separated recipients for build notifications')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh 'chmod +x scripts/ci/*.sh'
+            }
+        }
+
+        stage('Quality And Security') {
+            parallel {
+                stage('Unit Tests') {
+                    steps {
+                        sh '''
+                            set -e
+                            python3 --version
+                            if [ -d "tests" ]; then
+                              python3 -m pip install --upgrade pip
+                              python3 -m pip install pytest
+                              python3 -m pytest tests -v --junitxml=test-results.xml
+                            else
+                              echo "No tests directory found. Skipping unit tests."
+                            fi
+                        '''
+                    }
+                    post {
+                        always {
+                            junit allowEmptyResults: true, testResults: 'test-results.xml'
+                        }
+                    }
+                }
+                stage('SonarQube Scan') {
+                    when {
+                        expression { return params.RUN_SONAR }
+                    }
+                    steps {
+                        withSonarQubeEnv("${env.SONARQUBE_SERVER}") {
+                            script {
+                                def scannerHome = tool "${env.SONAR_SCANNER_TOOL}"
+                                sh """
+                                    ${scannerHome}/bin/sonar-scanner \
+                                      -Dsonar.projectVersion=${BUILD_NUMBER}
+                                """
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Sonar Quality Gate') {
+            when {
+                expression { return params.RUN_SONAR }
+            }
+            steps {
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Build Artifact') {
+            steps {
+                sh '''
+                    set -e
+                    ./scripts/ci/package_artifacts.sh "${ARTIFACT_NAME}"
+                    ls -lh dist/
+                '''
+            }
+            post {
+                success {
+                    archiveArtifacts artifacts: 'dist/*.tar.gz', fingerprint: true
+                }
+            }
+        }
+
+        stage('Publish Artifact To JFrog') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: params.JFROG_CREDENTIALS_ID, usernameVariable: 'JFROG_USER', passwordVariable: 'JFROG_PASS')]) {
+                    sh '''
+                        set -e
+                        ./scripts/ci/publish_to_jfrog.sh "${ARTIFACT_NAME}" "${JFROG_PLATFORM_URL}" "${JFROG_REPO}" "${JFROG_USER}" "${JFROG_PASS}"
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy To Dev') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: params.DEV_AWS_CREDENTIALS_ID]]) {
+                    sh '''
+                        set -e
+                        ./scripts/ci/deploy_environment.sh dev "${ARTIFACT_NAME}" "${REDSHIFT_PASSWORD}"
+                    '''
+                }
+            }
+        }
+
+        stage('Approval Gate For Prod') {
+            when {
+                expression { return !params.AUTO_APPROVE_PROD }
+            }
+            steps {
+                timeout(time: 60, unit: 'MINUTES') {
+                    input message: 'Approve deployment to PROD?', ok: 'Deploy PROD'
+                }
+            }
+        }
+
+        stage('Deploy To Prod') {
+            steps {
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: params.PROD_AWS_CREDENTIALS_ID]]) {
+                    sh '''
+                        set -e
+                        ./scripts/ci/deploy_environment.sh prod "${ARTIFACT_NAME}" "${REDSHIFT_PASSWORD}"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully: Dev and Prod deployments are done.'
+            emailext(
+                to: "${params.EMAIL_RECIPIENTS}",
+                subject: "[SUCCESS] ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """Jenkins pipeline succeeded.
+
+Job: ${env.JOB_NAME}
+Build: #${env.BUILD_NUMBER}
+Branch: ${env.BRANCH_NAME}
+URL: ${env.BUILD_URL}
+
+Dev and Prod deployment flow completed successfully.
+"""
+            )
+        }
+        failure {
+            echo 'Pipeline failed. Check failed stage logs in Jenkins.'
+            emailext(
+                to: "${params.EMAIL_RECIPIENTS}",
+                subject: "[FAILURE] ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+                body: """Jenkins pipeline failed.
+
+Job: ${env.JOB_NAME}
+Build: #${env.BUILD_NUMBER}
+Branch: ${env.BRANCH_NAME}
+URL: ${env.BUILD_URL}
+
+Check Jenkins console logs for the failed stage details.
+"""
+            )
+        }
+        always {
+            cleanWs()
+        }
+    }
+}
